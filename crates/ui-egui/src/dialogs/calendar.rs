@@ -2,7 +2,7 @@
 //! chosen, the options (look overrides start from the chosen style's own values), and a live
 //! preview of exactly what OK makes. `file.newCalendar` and `layout.insertCalendar` do the work.
 
-use designcraft_engine::cmd::calendar::{STYLES, look_defaults, preview};
+use designcraft_engine::cmd::calendar::{STYLES, look_defaults, placeholder_frame, preview};
 use serde_json::{Map, Value, json};
 
 use super::{Dialog, check, text_field, text_field_named, translated_combo};
@@ -28,10 +28,8 @@ pub(crate) fn title(d: &Dialog) -> &'static str {
 /// margins of the page in view. (placeholder, 0-based page, size in points)
 fn target(app: &DesignApp) -> Option<(bool, usize, (f64, f64))> {
     let st = app.session.active()?;
-    if let [id] = st.selection.items.as_slice()
-        && let Some(it) = st.doc.item(*id).filter(|it| matches!(it.content, designcraft_doc::Content::Unassigned) && !it.is_group())
-    {
-        let b = it.bounds();
+    // The command's own test, so a frame it won't fill is never shown as filled.
+    if let Some((_, _, b)) = placeholder_frame(&st.doc, &st.selection.items) {
         return Some((true, 0, (b.width(), b.height())));
     }
     let page = crate::canvas::current_page(app).unwrap_or(0);
@@ -181,6 +179,10 @@ pub(crate) fn body(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialog) {
                 Err(e) => {
                     ui.colored_label(ui.visuals().error_fg_color, e);
                 }
+            }
+            // Why OK was refused (set by `dialogs::confirm`), until the next try.
+            if let Some(Value::String(error)) = d.fields.get("status") {
+                ui.colored_label(ui.visuals().error_fg_color, error);
             }
             if d.s("mode") == "insert" {
                 let text = match target(app) {
@@ -436,5 +438,40 @@ mod tests {
         let r = super::super::confirm(&mut app).unwrap();
         assert_eq!(r["styles"], "Calendar 2");
         assert!(preview(&app.session.cache, &json!({"style": "minimal", "previewSize": [300, 200]}), 200).is_ok());
+    }
+
+    /// An empty frame the command won't replace (here, inside a group) isn't shown as filled:
+    /// the calendar goes on the page in view, as the dialog says.
+    #[test]
+    fn a_grouped_empty_frame_is_not_offered_as_the_place() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"pages": 1})).unwrap();
+        let a = app.run("frame.create", json!({"rect": [100, 100, 300, 300], "content": "unassigned"})).unwrap()["id"].clone();
+        let b = app.run("frame.create", json!({"rect": [320, 100, 500, 300], "content": "unassigned"})).unwrap()["id"].clone();
+        app.run("object.group", json!({"ids": [a, b]})).unwrap();
+        app.run("selection.set", json!({"ids": [a]})).unwrap();
+        assert!(matches!(target(&app), Some((false, 0, _))), "{:?}", target(&app));
+        app.run("app.insertCalendar", json!({})).unwrap();
+        let r = super::super::confirm(&mut app).unwrap();
+        assert_eq!(r["pages"], json!([1]));
+        assert!(app.session.doc().unwrap().doc.item(designcraft_doc::ItemId(a.as_u64().unwrap())).is_some(), "the grouped frame stays");
+    }
+
+    /// OK with settings the command refuses keeps the dialog open, with every setting and the
+    /// reason, instead of closing it and losing the choices.
+    #[test]
+    fn a_refused_calendar_keeps_the_dialog_open() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("app.newCalendar", json!({})).unwrap();
+        let d = app.ui.dialog.as_mut().unwrap();
+        d.fields.insert("months".into(), json!("500"));
+        d.fields.insert("style".into(), json!("pastel"));
+        set_look(d, "accent", json!("#123456"));
+        assert!(super::super::confirm(&mut app).is_err());
+        let d = app.ui.dialog.as_ref().expect("the dialog stays open");
+        assert_eq!((d.s("style").as_str(), d.s("months").as_str()), ("pastel", "500"));
+        assert_eq!(look_value(d, &json!({}), "accent"), json!("#123456"));
+        assert!(d.s("status").contains("months"), "{}", d.s("status"));
+        assert!(app.session.active().is_none(), "nothing was made");
     }
 }

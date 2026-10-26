@@ -3872,7 +3872,17 @@ pub fn confirm(app: &mut DesignApp) -> Result<Value, String> {
                     "crop": [m("cropTop"), m("cropLeft"), m("cropBottom"), m("cropRight")]}),
             )
         }
-        calendar::ID => calendar::confirm(app, &d),
+        calendar::ID => {
+            // A refused calendar keeps the dialog and its settings open, with the reason.
+            let result = calendar::confirm(app, &d);
+            if let Err(error) = &result {
+                app.status(error.clone());
+                let mut d = d;
+                d.fields.insert("status".into(), json!(error));
+                app.ui.dialog = Some(d);
+            }
+            result
+        }
         "qrCode" => {
             let mut p = Value::Object(d.fields.clone());
             // Nothing selected: a 2-inch code at the top left of the page in view.

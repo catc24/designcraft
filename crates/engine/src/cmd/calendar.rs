@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 
+use chrono::{Datelike, NaiveDate};
 use designcraft_color::{Color, Swatch};
 use designcraft_doc::build::NewDocument;
 use designcraft_doc::{
@@ -44,56 +45,37 @@ pub fn specs() -> Vec<CommandSpec> {
     ]
 }
 
-// ---------- dates (proleptic Gregorian, days since 1970-01-01) ----------
+// ---------- dates (through chrono, as AGENTS.md asks) ----------
 
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = (m + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-
-fn civil_from_days(z: i64) -> (i64, i64, i64) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    (yoe + era * 400 + i64::from(m <= 2), m, d)
+/// The date `y`-`m`-`d`, when there is one.
+fn date(y: i64, m: i64, d: i64) -> Option<NaiveDate> {
+    NaiveDate::from_ymd_opt(i32::try_from(y).ok()?, u32::try_from(m).ok()?, u32::try_from(d).ok()?)
 }
 
 /// 0 = Sunday.
-fn weekday(days: i64) -> i64 {
-    (days + 4).rem_euclid(7)
+fn weekday(d: NaiveDate) -> i64 {
+    i64::from(d.weekday().num_days_from_sunday())
 }
 
 fn days_in_month(y: i64, m: i64) -> i64 {
-    let (ny, nm) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
-    days_from_civil(ny, nm, 1) - days_from_civil(y, m, 1)
+    let first = date(y, m, 1);
+    let next = if m == 12 { date(y + 1, 1, 1) } else { date(y, m + 1, 1) };
+    first.zip(next).map_or(0, |(a, b)| (b - a).num_days())
 }
 
-/// ISO 8601 week number of the week holding `days`.
-fn iso_week(days: i64) -> i64 {
-    let thursday = days - (weekday(days) + 6) % 7 + 3;
-    let (y, _, _) = civil_from_days(thursday);
-    (thursday - days_from_civil(y, 1, 1)) / 7 + 1
+/// ISO 8601 week number of the week holding `d`.
+fn iso_week(d: NaiveDate) -> i64 {
+    i64::from(d.iso_week().week())
 }
 
-fn parse_date(s: &str) -> Option<i64> {
-    let mut it = s.trim().splitn(3, '-');
-    let y: i64 = it.next()?.parse().ok()?;
-    let m: i64 = it.next()?.parse().ok()?;
-    let d: i64 = it.next()?.parse().ok()?;
-    if !(1..=9999).contains(&y) || !(1..=12).contains(&m) || d < 1 || d > days_in_month(y, m) {
-        return None;
-    }
-    Some(days_from_civil(y, m, d))
+/// `d` moved by `n` days (None past chrono's range).
+fn add_days(d: NaiveDate, n: i64) -> Option<NaiveDate> {
+    d.checked_add_signed(chrono::TimeDelta::try_days(n)?)
+}
+
+/// A `YYYY-MM-DD` date in years 1–9999.
+fn parse_date(s: &str) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok().filter(|d| (1..=9999).contains(&d.year()))
 }
 
 /// This year by the clock (2027 on a platform without one, which reads 1970).
@@ -425,7 +407,7 @@ struct Opts {
     notes: bool,
     week_numbers: bool,
     adjacent: bool,
-    events: BTreeMap<i64, Vec<String>>,
+    events: BTreeMap<NaiveDate, Vec<String>>,
     month_names: Vec<String>,
     day_names: Vec<String>,
 }
@@ -443,7 +425,7 @@ fn options(id: &str, p: &Value, default_months: i64) -> Result<Opts> {
         return Err(bad(id, "the calendar must end by the year 9999"));
     }
     let week_start = i64::from(choice(id, p, "weekStart", &["sunday", "monday"])? == Some("monday"));
-    let mut events: BTreeMap<i64, Vec<String>> = BTreeMap::new();
+    let mut events: BTreeMap<NaiveDate, Vec<String>> = BTreeMap::new();
     if let Some(list) = p.get("events").filter(|v| !v.is_null()) {
         let list = list.as_array().ok_or_else(|| bad(id, "`events` must be a list of {date, text}"))?;
         if list.len() > MAX_EVENTS {
@@ -927,7 +909,8 @@ fn tint(swatch: &str, t: f32) -> Fill {
 /// band can bleed off its top edge.
 fn month_block(b: &mut Builder, l: &Look, o: &Opts, area: Rect, page: Option<Rect>, y: i64, m: i64) -> Result<()> {
     let k = scale(area, l);
-    let first = days_from_civil(y, m, 1);
+    let no_date = || EngineError::Other(format!("no calendar for {y}-{m:02}"));
+    let first = date(y, m, 1).ok_or_else(no_date)?;
     let offset = (weekday(first) - o.week_start).rem_euclid(7);
     let dim = days_in_month(y, m);
     let rows = (offset + dim + 6) / 7;
@@ -1009,7 +992,7 @@ fn month_block(b: &mut Builder, l: &Look, o: &Opts, area: Rect, page: Option<Rec
     top += g.wd_h + g.wd_gap;
 
     let cell_h = ((bottom - top) / rows as f64).max(g.cell_h.min(1.0));
-    let start = first - offset;
+    let start = add_days(first, -offset).ok_or_else(no_date)?;
     let stroke = (g.grid > 0.0).then(|| Stroke {
         weight: g.grid,
         swatch: b.sw.grid.clone(),
@@ -1023,11 +1006,12 @@ fn month_block(b: &mut Builder, l: &Look, o: &Opts, area: Rect, page: Option<Rec
         }
         if o.week_numbers {
             let r = Rect::new(area.x0, ry, gx0, ry + cell_h);
-            b.text_with(r, &iso_week(start + row * 7).to_string(), "Week Number", 1.0_f64.min(cell_h * 0.1), VerticalJustification::Top)?;
+            let week = add_days(start, row * 7).ok_or_else(no_date)?;
+            b.text_with(r, &iso_week(week).to_string(), "Week Number", 1.0_f64.min(cell_h * 0.1), VerticalJustification::Top)?;
         }
         for col in 0..7 {
-            let day = start + row * 7 + col;
-            let (_, dm, dd) = civil_from_days(day);
+            let day = add_days(start, row * 7 + col).ok_or_else(no_date)?;
+            let (dm, dd) = (i64::from(day.month()), day.day());
             let in_month = dm == m;
             let wd = weekday(day);
             let weekend = wd == 0 || wd == 6;
@@ -1114,7 +1098,7 @@ fn year_block(b: &mut Builder, l: &Look, o: &Opts, area: Rect, page: Option<Rect
         let name = if y_first == y_last { o.month_name(m).to_string() } else { format!("{} {y}", o.month_name(m)) };
         b.text(Rect::new(x, my, x + g.mw, my + 16.0 * k), &name, "Mini Month")?;
         let mut text: String = (0..7).map(|c| format!("\t{}", o.day_name(c).chars().next().unwrap_or(' '))).collect();
-        let first_day = days_from_civil(y, m, 1);
+        let Some(first_day) = date(y, m, 1) else { continue };
         let offset = (weekday(first_day) - o.week_start).rem_euclid(7);
         let dim = days_in_month(y, m);
         for row in 0..6 {
@@ -1229,6 +1213,17 @@ fn page_at(d: &Document, si: usize, x: f64) -> usize {
     before + pi
 }
 
+/// The frame Insert Calendar fills and replaces when it is given no `page` or `rect`: the only
+/// selected object, an empty (unassigned) frame at the top level of a document spread. Its id,
+/// spread index and bounds. The dialog asks the same question, so what it shows is what happens.
+pub fn placeholder_frame(d: &Document, selection: &[ItemId]) -> Option<(ItemId, usize, Rect)> {
+    let [id] = selection else { return None };
+    let it = d.item(*id).filter(|it| matches!(it.content, Content::Unassigned) && !it.is_group())?;
+    let loc = d.find(*id)?;
+    let SpreadRef::Doc(si) = loc.spread else { return None };
+    (loc.path.len() == 1).then(|| (*id, si, it.bounds()))
+}
+
 fn insert_calendar(s: &mut Session, p: &Value) -> Result<Value> {
     let l = look(INSERT, p)?;
     let o = options(INSERT, p, 1)?;
@@ -1249,18 +1244,7 @@ fn insert_calendar(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let st = s.doc()?;
     // With neither, the calendar takes the place of a selected empty frame.
-    let placeholder = if rect.is_none() && page.is_none() {
-        match st.selection.items.as_slice() {
-            [id] => st.doc.item(*id).filter(|it| matches!(it.content, Content::Unassigned) && !it.is_group()).and_then(|it| {
-                let loc = st.doc.find(*id)?;
-                let SpreadRef::Doc(si) = loc.spread else { return None };
-                (loc.path.len() == 1).then(|| (*id, si, it.bounds()))
-            }),
-            _ => None,
-        }
-    } else {
-        None
-    };
+    let placeholder = if rect.is_none() && page.is_none() { placeholder_frame(&st.doc, &st.selection.items) } else { None };
     let blocks = usize::try_from(o.blocks()).map_err(|_| bad(INSERT, "too many months"))?;
     s.edit(|d, sel| {
         let (p0, area0) = match placeholder {
@@ -1339,19 +1323,19 @@ mod tests {
 
     #[test]
     fn dates_round_trip_and_know_their_weekdays() {
-        for z in [-800_000, -1, 0, 1, 19_000, 2_932_896] {
-            let (y, m, d) = civil_from_days(z);
-            assert_eq!(days_from_civil(y, m, d), z);
-        }
+        let d = |y, m, dd| date(y, m, dd).unwrap();
         // 2027-01-01 is a Friday, 2024 is a leap year, 1900 isn't.
-        assert_eq!(weekday(days_from_civil(2027, 1, 1)), 5);
-        assert_eq!((days_in_month(2024, 2), days_in_month(1900, 2), days_in_month(2000, 2)), (29, 28, 29));
+        assert_eq!(weekday(d(2027, 1, 1)), 5);
+        assert_eq!((days_in_month(2024, 2), days_in_month(1900, 2), days_in_month(2000, 2), days_in_month(9999, 12)), (29, 28, 29, 31));
         // ISO weeks: 2027-01-01 is in week 53 of 2026.
-        assert_eq!(iso_week(days_from_civil(2027, 1, 1)), 53);
-        assert_eq!(iso_week(days_from_civil(2027, 1, 4)), 1);
+        assert_eq!(iso_week(d(2027, 1, 1)), 53);
+        assert_eq!(iso_week(d(2027, 1, 4)), 1);
+        // A grid that starts before January of year 1 still has its days.
+        assert_eq!(add_days(d(1, 1, 1), -6).map(|x| x.year()), Some(0));
+        assert_eq!(date(2027, 2, 29), None);
         assert_eq!(parse_date("2027-02-29"), None);
-        assert!(parse_date("2028-02-29").is_some());
-        assert_eq!(parse_date("nope"), None);
+        assert_eq!(parse_date("2028-02-29"), Some(d(2028, 2, 29)));
+        assert_eq!((parse_date("nope"), parse_date("0000-01-01"), parse_date("10000-01-01")), (None, None, None));
         assert_eq!((wrapped_lines("a bb ccc", 4), wrapped_lines("abcdefghij", 4), wrapped_lines("", 4)), (2, 3, 1));
     }
 
