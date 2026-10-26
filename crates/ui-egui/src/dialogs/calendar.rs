@@ -75,6 +75,22 @@ fn preview_params(app: &DesignApp, d: &Dialog, look: bool) -> Value {
     p
 }
 
+/// The month count each layout starts with: Insert Calendar places one month by default, but a
+/// year at a glance is twelve.
+fn default_months(mode: &str, layout: &str) -> &'static str {
+    if mode == "insert" && layout == "month" { "1" } else { "12" }
+}
+
+/// After the layout changed from `was`: a month count still at the old layout's default
+/// follows to the new one's, so Year at a Glance doesn't show a single month. A count the
+/// user typed stays.
+fn layout_changed(d: &mut Dialog, was: &str) {
+    let (mode, now) = (d.s("mode"), d.s("layout"));
+    if now != was && d.s("months").trim() == default_months(&mode, was) {
+        d.fields.insert("months".into(), json!(default_months(&mode, &now)));
+    }
+}
+
 /// The rendered preview of `p`, kept per `slot` until the params change.
 fn texture(ui: &egui::Ui, app: &DesignApp, slot: &str, p: &Value, px: u32) -> Result<egui::TextureHandle, String> {
     type Cached = (String, Result<egui::TextureHandle, String>);
@@ -219,7 +235,9 @@ fn settings(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialog, lang: &str) 
             text_field(ui, d, "months", 60.0);
             ui.end_row();
             crate::rtl::label(ui, tr("Layout:"));
+            let was = d.s("layout");
             translated_combo(lang, ui, d, "layout", &[("month", "One Month per Page"), ("year", "Year at a Glance")]);
+            layout_changed(d, &was);
             ui.end_row();
             crate::rtl::label(ui, tr("Week Starts On:"));
             translated_combo(lang, ui, d, "weekStart", &[("sunday", "Sunday"), ("monday", "Monday")]);
@@ -441,6 +459,41 @@ mod tests {
         let r = super::super::confirm(&mut app).unwrap();
         assert_eq!(r["styles"], "Calendar 2");
         assert!(preview(&app.session.cache, &json!({"style": "minimal", "previewSize": [300, 200]}), 200).is_ok());
+    }
+
+    /// Insert Calendar starts at one month; switching to Year at a Glance made a year grid of a
+    /// single month. The count follows the layout while it is still the default, and a count
+    /// the user typed stays.
+    #[test]
+    fn the_month_count_follows_the_layout_until_edited() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"pages": 1})).unwrap();
+        app.run("app.insertCalendar", json!({})).unwrap();
+        let d = app.ui.dialog.as_mut().unwrap();
+        let switch = |d: &mut Dialog, to: &str| {
+            let was = d.s("layout");
+            d.fields.insert("layout".into(), json!(to));
+            layout_changed(d, &was);
+        };
+        switch(d, "year");
+        assert_eq!(d.s("months"), "12");
+        switch(d, "month");
+        assert_eq!(d.s("months"), "1");
+        d.fields.insert("months".into(), json!("3"));
+        switch(d, "year");
+        assert_eq!(d.s("months"), "3", "a typed count stays");
+        // The year layout really draws twelve months.
+        d.fields.insert("months".into(), json!("1"));
+        switch(d, "month");
+        switch(d, "year");
+        super::super::confirm(&mut app).unwrap();
+        let doc = &app.session.doc().unwrap().doc;
+        let minis = doc.stories.values().filter(|st| st.paras.first().is_some_and(|p| p.style == "Calendar Mini Month")).count();
+        assert_eq!(minis, 12);
+        // A new calendar starts at twelve either way.
+        let mut d = Dialog::new(ID, json!({}));
+        switch(&mut d, "year");
+        assert_eq!(d.s("months"), "12");
     }
 
     /// A frame past the preview's 5000-point limit is previewed scaled down in its own shape,
