@@ -653,19 +653,27 @@ fn month_geom(area: Rect, l: &Look, o: &Opts, k: f64, rows: i64) -> MonthGeom {
     let wd_total = wd_h + wd_gap;
     let mut photo_h = if o.photo { h * 0.42 } else { 0.0 };
     let mut notes_h = if o.notes { (h * 0.16).max(30.0 * k) } else { 0.0 };
-    // The days keep at least 40% of the height: the picture gives way first, then the notes.
+    // The days keep at least 40% of the height. When the picture and the notes want more than
+    // what's left, both shrink in proportion; one is left out only when it would be too small
+    // to use (the notes first, then the picture).
     let rest = |photo: f64, notes: f64| {
         h - header_total - wd_total - if photo > 0.0 { photo + 14.0 * k } else { 0.0 } - if notes > 0.0 { notes + 12.0 * k } else { 0.0 }
     };
     let grid_min = h * 0.4;
-    if rest(photo_h, notes_h) < grid_min && photo_h > 0.0 {
-        photo_h = (photo_h - (grid_min - rest(photo_h, notes_h))).max(0.0);
-        if photo_h < 24.0 * k {
+    let extras = |photo: f64, notes: f64| photo + notes;
+    if rest(photo_h, notes_h) < grid_min && extras(photo_h, notes_h) > 0.0 {
+        let room = (extras(photo_h, notes_h) - (grid_min - rest(photo_h, notes_h))).max(0.0);
+        let f = room / extras(photo_h, notes_h);
+        photo_h *= f;
+        notes_h *= f;
+        if notes_h > 0.0 && notes_h < 30.0 * k {
+            // Too small for a ruled line: its room goes back to the picture.
+            photo_h += notes_h + 12.0 * k;
+            notes_h = 0.0;
+        }
+        if photo_h > 0.0 && photo_h < 24.0 * k {
             photo_h = 0.0;
         }
-    }
-    if rest(photo_h, notes_h) < grid_min {
-        notes_h = 0.0;
     }
     let wk_w = if o.week_numbers { (20.0 * k).min(w * 0.08) } else { 0.0 };
     let cell_w = ((w - wk_w) / 7.0).max(0.5);
@@ -1006,7 +1014,8 @@ fn month_block(b: &mut Builder, l: &Look, o: &Opts, area: Rect, page: Option<Rec
         }
         if o.week_numbers {
             let r = Rect::new(area.x0, ry, gx0, ry + cell_h);
-            let week = add_days(start, row * 7).ok_or_else(no_date)?;
+            // The ISO week of the row's Monday: a Sunday-first row's Sunday still belongs to the week before.
+            let week = add_days(start, row * 7 + 1 - o.week_start).ok_or_else(no_date)?;
             b.text_with(r, &iso_week(week).to_string(), "Week Number", 1.0_f64.min(cell_h * 0.1), VerticalJustification::Top)?;
         }
         for col in 0..7 {
@@ -1551,5 +1560,51 @@ mod tests {
             .unwrap();
         let issues = s.execute("preflight.run", &json!({})).unwrap();
         assert_eq!(issues["issues"].as_array().unwrap().iter().filter(|i| i["kind"] == "overset").count(), 0);
+    }
+
+    /// The notes area went missing with a picture frame on a portrait page: once the picture had
+    /// shrunk to leave the days their room, a rounding error a hair short of it dropped the
+    /// notes too. Every option asked for is there when there is room for it.
+    #[test]
+    fn photo_and_notes_both_stay_on_a_portrait_page() {
+        for style in STYLES {
+            for size in ["letter", "a4", "a5", "tabloid"] {
+                let mut s = Session::new();
+                s.execute(
+                    "file.newCalendar",
+                    &json!({"year": 2026, "months": 12, "style": style, "size": size, "photo": true, "notes": true, "weekNumbers": true}),
+                )
+                .unwrap();
+                let doc = &s.doc().unwrap().doc;
+                let notes = doc.stories.values().filter(|st| st.text == "Notes").count();
+                let photos = doc.spreads.iter().flat_map(|sp| &sp.items).filter(|i| i.alt_text == "Calendar photo").count();
+                assert_eq!((notes, photos), (12, 12), "{style} {size}");
+            }
+        }
+    }
+
+    /// A Sunday-first week is numbered by its Monday: the row with Monday 4 January 2027 is ISO
+    /// week 1, not the 53 its Sunday (3 January) belongs to. A Monday-first row is unchanged.
+    #[test]
+    fn week_numbers_follow_each_rows_monday() {
+        let numbers = |week_start: &str| {
+            let mut s = Session::new();
+            s.execute("file.newCalendar", &json!({"year": 2027, "months": 1, "weekNumbers": true, "weekStart": week_start})).unwrap();
+            let d = &s.doc().unwrap().doc;
+            let mut rows: Vec<(f64, String)> = d.spreads[0]
+                .items
+                .iter()
+                .filter_map(|i| {
+                    let st = d.story(i.text_frame()?.story)?;
+                    (st.paras.first()?.style == "Calendar Week Number").then(|| (i.bounds().y0, st.text.clone()))
+                })
+                .collect();
+            rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+            rows.into_iter().map(|(_, t)| t).collect::<Vec<_>>()
+        };
+        // Sunday first: Dec 27–Jan 2 (week 53 of 2026), Jan 3–9 (week 1), … Jan 31–Feb 6 (week 5).
+        assert_eq!(numbers("sunday"), ["53", "1", "2", "3", "4", "5"]);
+        // Monday first: Dec 28–Jan 3 (53), Jan 4–10 (1), … Jan 25–31 (4).
+        assert_eq!(numbers("monday"), ["53", "1", "2", "3", "4"]);
     }
 }
