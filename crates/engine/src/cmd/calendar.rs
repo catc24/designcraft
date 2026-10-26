@@ -561,6 +561,8 @@ fn title_size(o: &Opts, k: f64) -> f64 {
 /// Twelve-up geometry of the year layout in `area`.
 struct YearGeom {
     cols: i64,
+    /// The notes area under the months (0 = none).
+    notes_h: f64,
     title_h: f64,
     top: f64,
     gutter: f64,
@@ -570,17 +572,27 @@ struct YearGeom {
     size: f64,
 }
 
-fn year_geom(area: Rect, l: &Look, k: f64) -> YearGeom {
+fn year_geom(area: Rect, l: &Look, o: &Opts, k: f64) -> YearGeom {
+    let h = area.height();
     let title_h = if l.show_title { 54.0 * k } else { 0.0 };
     let top = if l.show_title { title_h + 20.0 * k } else { 0.0 };
+    // Notes take up to 15% under the months, which keep at least 55% of the height.
+    let notes_h = if o.notes {
+        let room = h - top - h * 0.55 - 12.0 * k;
+        let n = (h * 0.15).max(NOTES_MIN * k).min(room);
+        if n >= NOTES_LABEL * k { n } else { 0.0 }
+    } else {
+        0.0
+    };
+    let months_h = h - top - if notes_h > 0.0 { notes_h + 12.0 * k } else { 0.0 };
     let (cols, rows) = if area.width() > area.height() { (4_i64, 3_i64) } else { (3, 4) };
     let gutter = 18.0 * k;
     let mw = ((area.width() - gutter * (cols - 1) as f64) / cols as f64).max(1.0);
-    let mh = ((area.height() - top - gutter * (rows - 1) as f64) / rows as f64).max(1.0);
+    let mh = ((months_h - gutter * (rows - 1) as f64) / rows as f64).max(1.0);
     // No floors: a tiny block gets tiny type rather than text too big to show.
     let lead = ((mh - 18.0 * k) / 7.0).max(0.1);
     let size = (lead * 0.62).min(mw / 7.0 * 0.5).max(0.05);
-    YearGeom { cols, title_h, top, gutter, mw, mh, lead, size }
+    YearGeom { cols, notes_h, title_h, top, gutter, mw, mh, lead, size }
 }
 
 /// Where one month's parts go in `area` and how big its type is, so every piece of text fits its
@@ -609,6 +621,26 @@ struct MonthGeom {
     number_size: f64,
     event_size: f64,
     week_size: f64,
+}
+
+/// The notes area's label height, and its height with one ruled line under the label (× scale).
+const NOTES_LABEL: f64 = 14.0;
+const NOTES_MIN: f64 = 30.0;
+
+/// The notes area: its label and ruled lines in the `notes_h` at the bottom of `area`. Returns
+/// the new bottom for what goes above it.
+fn notes_area(b: &mut Builder, area: Rect, notes_h: f64, k: f64) -> Result<f64> {
+    if notes_h <= 0.0 {
+        return Ok(area.y1);
+    }
+    let ny = area.y1 - notes_h;
+    b.text(Rect::new(area.x0, ny, area.x1, ny + NOTES_LABEL * k), "Notes", "Notes")?;
+    let mut ly = ny + NOTES_MIN * k;
+    while ly <= area.y1 + 0.01 {
+        b.line(area.x0, area.x1, ly, 0.5, 0.35)?;
+        ly += 18.0 * k;
+    }
+    Ok(ny - 12.0 * k)
 }
 
 /// Points a line of `size` type needs in a frame: the font's full ascent and descent, which can
@@ -660,22 +692,30 @@ fn month_geom(area: Rect, l: &Look, o: &Opts, k: f64, rows: i64) -> MonthGeom {
         h - header_total - wd_total - if photo > 0.0 { photo + 14.0 * k } else { 0.0 } - if notes > 0.0 { notes + 12.0 * k } else { 0.0 }
     };
     let grid_min = h * 0.4;
-    let extras = |photo: f64, notes: f64| photo + notes;
-    if rest(photo_h, notes_h) < grid_min && extras(photo_h, notes_h) > 0.0 {
-        let room = (extras(photo_h, notes_h) - (grid_min - rest(photo_h, notes_h))).max(0.0);
-        let f = room / extras(photo_h, notes_h);
-        photo_h *= f;
-        notes_h *= f;
-        if photo_h > 0.0 && notes_h > 0.0 && notes_h < 30.0 * k {
-            // Too small for a ruled line beside a picture: its room goes to the picture.
-            photo_h += notes_h + 12.0 * k;
-            notes_h = 0.0;
-        } else if notes_h > 0.0 && notes_h < 14.0 * k {
-            // Without a picture the notes stay, unless their label can't fit.
-            notes_h = 0.0;
-        }
-        if photo_h > 0.0 && photo_h < 24.0 * k {
+    // Room still missing for the days (a hair of rounding counts as none).
+    let short = |photo: f64, notes: f64| {
+        let d = grid_min - rest(photo, notes);
+        if d > 1e-6 { d } else { 0.0 }
+    };
+    // In turn: the picture down to a third, the notes down to their label and one ruled line,
+    // the picture down to nothing, then the notes down to their label alone.
+    if photo_h > 0.0 {
+        photo_h = (photo_h - short(photo_h, notes_h)).max(photo_h * 0.35);
+    }
+    let notes_min = NOTES_MIN * k;
+    if notes_h > 0.0 {
+        notes_h = (notes_h - short(photo_h, notes_h)).max(notes_min.min(notes_h));
+    }
+    if photo_h > 0.0 {
+        photo_h -= short(photo_h, notes_h);
+        if photo_h < 24.0 * k {
             photo_h = 0.0;
+        }
+    }
+    if notes_h > 0.0 {
+        notes_h -= short(photo_h, notes_h);
+        if notes_h < NOTES_LABEL * k {
+            notes_h = 0.0;
         }
     }
     let wk_w = if o.week_numbers { (20.0 * k).min(w * 0.08) } else { 0.0 };
@@ -815,7 +855,7 @@ fn define_styles(d: &mut Document, l: &Look, o: &Opts, n: &Names, sw: &Swatches,
     add_style(d, &n.n("Week Number"), aligned(Align::Center), CharAttrs { fill_tint: Some(0.6), ..chars(&l.text, g.week_size, ink) });
     add_style(d, &n.n("Notes"), aligned(Align::Left), caps(chars(&l.title, 8.0 * k, accent), 80.0));
     if o.year_layout {
-        let g = year_geom(area, l, k);
+        let g = year_geom(area, l, o, k);
         let tabs: Vec<TabStop> = (0..7)
             .map(|c| TabStop { position: (c as f64 + 0.5) * g.mw / 7.0, align: TabAlign::Center, leader: String::new(), align_on: String::new() })
             .collect();
@@ -969,17 +1009,7 @@ fn month_block(b: &mut Builder, l: &Look, o: &Opts, area: Rect, page: Option<Rec
         }
     }
 
-    let mut bottom = area.y1;
-    if g.notes_h > 0.0 {
-        let ny = bottom - g.notes_h;
-        b.text(Rect::new(area.x0, ny, area.x1, ny + 14.0 * k), "Notes", "Notes")?;
-        let mut ly = ny + 30.0 * k;
-        while ly <= bottom + 0.01 {
-            b.line(area.x0, area.x1, ly, 0.5, 0.35)?;
-            ly += 18.0 * k;
-        }
-        bottom = ny - 12.0 * k;
-    }
+    let bottom = notes_area(b, area, g.notes_h, k)?;
 
     let gx0 = area.x0 + g.wk_w;
     let (cell_w, gap) = (g.cell_w, g.gap);
@@ -1070,7 +1100,7 @@ fn month_block(b: &mut Builder, l: &Look, o: &Opts, area: Rect, page: Option<Rec
 /// Up to twelve months at a glance in `area`, from the `first`th month of the run.
 fn year_block(b: &mut Builder, l: &Look, o: &Opts, area: Rect, page: Option<Rect>, first: i64) -> Result<()> {
     let k = scale(area, l);
-    let g = year_geom(area, l, k);
+    let g = year_geom(area, l, o, k);
     if l.show_title {
         let (y0, _) = o.month(first);
         let (y1, _) = o.month((first + 11).min(o.months - 1));
@@ -1085,6 +1115,7 @@ fn year_block(b: &mut Builder, l: &Look, o: &Opts, area: Rect, page: Option<Rect
         let label = if y0 == y1 { y0.to_string() } else { format!("{y0}–{y1}") };
         b.text_with(Rect::new(area.x0 + pad, area.y0, area.x1 - pad, area.y0 + g.title_h), &label, "Month", 0.0, VerticalJustification::Center)?;
     }
+    notes_area(b, area, g.notes_h, k)?;
     let top = area.y0 + g.top;
     let (y_first, _) = o.month(first);
     let (y_last, _) = o.month((first + 11).min(o.months - 1));
@@ -1657,5 +1688,39 @@ mod tests {
         assert_eq!(page_at(&d, 1, left.x - 500.0), 2);
         assert_eq!(page_at(&d, 1, right.x + right.width + 500.0), 1);
         assert_eq!(page_at(&d, 0, -50.0), 0);
+    }
+
+    /// The notes still went missing: Year at a Glance never drew them, and beside a picture at
+    /// a larger type size they shrank in proportion with the picture until too small, though the
+    /// picture had room to give. Every page of every layout, size and type size has its notes,
+    /// with at least one ruled line, and nothing overset.
+    #[test]
+    fn notes_are_on_every_page_whatever_the_options() {
+        for style in STYLES {
+            for size in ["letter", "a5", "tabloid"] {
+                for orientation in ["portrait", "landscape"] {
+                    for layout in ["month", "year"] {
+                        for (photo, scale) in [(false, 1.0), (true, 1.0), (true, 2.0), (false, 2.0), (true, 0.5)] {
+                            let mut s = Session::new();
+                            let p = json!({"year": 2026, "months": 12, "style": style, "size": size, "orientation": orientation,
+                                "layout": layout, "photo": photo, "notes": true, "weekNumbers": true, "fontScale": scale});
+                            let pages = s.execute("file.newCalendar", &p).unwrap()["pages"].as_u64().unwrap() as usize;
+                            let d = &s.doc().unwrap().doc;
+                            let notes = d.stories.values().filter(|st| st.text == "Notes").count();
+                            let ruled =
+                                d.spreads.iter().flat_map(|sp| &sp.items).filter(|i| i.shape == Shape::GraphicLine && i.stroke.tint < 0.4).count();
+                            assert_eq!(notes, pages, "{p}");
+                            assert!(ruled >= pages, "{p}: {ruled} ruled lines");
+                            if layout == "month" && photo {
+                                let photos = d.spreads.iter().flat_map(|sp| &sp.items).filter(|i| i.alt_text == "Calendar photo").count();
+                                assert_eq!(photos, pages, "{p}");
+                            }
+                            let issues = s.execute("preflight.run", &json!({})).unwrap();
+                            assert_eq!(issues["issues"].as_array().unwrap().iter().filter(|i| i["kind"] == "overset").count(), 0, "{p}");
+                        }
+                    }
+                }
+            }
+        }
     }
 }

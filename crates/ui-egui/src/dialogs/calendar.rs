@@ -258,7 +258,11 @@ fn settings(app: &mut DesignApp, ui: &mut egui::Ui, d: &mut Dialog, lang: &str) 
         if insert {
             ui.weak(tr("More months than one continue on the following pages, adding pages as needed."));
         }
-        check(ui, d, "photo", tr("Picture Frame Above Each Month"));
+        // Year at a Glance has no room for a picture per month.
+        let year = d.s("layout") == "year";
+        ui.add_enabled_ui(!year, |ui| check(ui, d, "photo", tr("Picture Frame Above Each Month")))
+            .response
+            .on_disabled_hover_text(tr("Only for One Month per Page"));
         check(ui, d, "notes", tr("Notes Area"));
         check(ui, d, "weekNumbers", tr("Week Numbers"));
         check(ui, d, "adjacentDays", tr("Show Days of Adjacent Months"));
