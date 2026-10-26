@@ -1217,11 +1217,22 @@ fn new_calendar(s: &mut Session, p: &Value) -> Result<Value> {
 
 // ---------- Layout › Insert Calendar ----------
 
-/// Absolute index of the page of spread `si` under spread x `x` (its nearest page).
+/// Absolute index of the page of spread `si` under spread x `x`, or the nearest page to it. A
+/// right-to-left spread lists its pages right to left, so each page's own bounds decide, not
+/// the order.
 fn page_at(d: &Document, si: usize, x: f64) -> usize {
     let before: usize = d.spreads.iter().take(si).map(|s| s.pages.len()).sum();
     let Some(sp) = d.spreads.get(si) else { return before };
-    let pi = sp.pages.iter().position(|pg| x < pg.x + pg.width).unwrap_or(sp.pages.len().saturating_sub(1));
+    let distance = |pg: &designcraft_doc::Page| {
+        if x < pg.x {
+            pg.x - x
+        } else if x >= pg.x + pg.width {
+            x - (pg.x + pg.width)
+        } else {
+            0.0
+        }
+    };
+    let pi = sp.pages.iter().enumerate().min_by(|a, b| distance(a.1).total_cmp(&distance(b.1))).map_or(0, |(i, _)| i);
     before + pi
 }
 
@@ -1624,5 +1635,27 @@ mod tests {
         assert_eq!(doc.stories.values().filter(|st| st.text == "Notes").count(), 1, "the notes stay");
         let issues = s.execute("preflight.run", &json!({})).unwrap();
         assert_eq!(issues["issues"].as_array().unwrap().iter().filter(|i| i["kind"] == "overset").count(), 0);
+    }
+
+    /// A right-to-left spread lists its pages right to left: a point on its left page used to
+    /// find the right one, the first page whose right edge lay beyond it.
+    #[test]
+    fn page_at_follows_each_pages_bounds_in_any_order() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({"pages": 3, "facingPages": true})).unwrap();
+        let mut d = (*s.doc().unwrap().doc).clone();
+        let sp = d.spread_mut(SpreadRef::Doc(1)).unwrap();
+        sp.pages[0].side = designcraft_doc::PageSide::Right;
+        sp.pages[1].side = designcraft_doc::PageSide::Left;
+        sp.relayout();
+        let (right, left) = (sp.pages[0].clone(), sp.pages[1].clone());
+        assert!(left.x < right.x, "laid out right to left");
+        // Spread 1 holds absolute pages 1 and 2: pages[0] is 1, pages[1] is 2.
+        assert_eq!(page_at(&d, 1, left.x + 10.0), 2);
+        assert_eq!(page_at(&d, 1, right.x + 10.0), 1);
+        // Off the spread: the nearest page.
+        assert_eq!(page_at(&d, 1, left.x - 500.0), 2);
+        assert_eq!(page_at(&d, 1, right.x + right.width + 500.0), 1);
+        assert_eq!(page_at(&d, 0, -50.0), 0);
     }
 }

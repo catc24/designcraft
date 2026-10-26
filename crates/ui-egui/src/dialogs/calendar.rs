@@ -67,7 +67,10 @@ fn preview_params(app: &DesignApp, d: &Dialog, look: bool) -> Value {
     if d.s("mode") == "insert"
         && let Some((_, _, (w, h))) = target(app)
     {
-        p["previewSize"] = json!([w.max(36.0), h.max(36.0)]);
+        // The preview draws blocks up to 5000 pt a side: a bigger frame is previewed scaled down,
+        // keeping its shape (the calendar itself still fills the frame).
+        let fit = (5000.0 / w.max(h).max(1.0)).min(1.0);
+        p["previewSize"] = json!([(w * fit).max(36.0), (h * fit).max(36.0)]);
     }
     p
 }
@@ -438,6 +441,22 @@ mod tests {
         let r = super::super::confirm(&mut app).unwrap();
         assert_eq!(r["styles"], "Calendar 2");
         assert!(preview(&app.session.cache, &json!({"style": "minimal", "previewSize": [300, 200]}), 200).is_ok());
+    }
+
+    /// A frame past the preview's 5000-point limit is previewed scaled down in its own shape,
+    /// not as the Letter page the preview fell back to.
+    #[test]
+    fn a_huge_frame_is_previewed_in_its_shape() {
+        let mut app = DesignApp::new(designcraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 5000, "height": 5000})).unwrap();
+        let f = app.run("frame.create", json!({"rect": [-2000, 0, 6000, 2000], "content": "unassigned"})).unwrap()["id"].clone();
+        app.run("selection.set", json!({"ids": [f]})).unwrap();
+        app.run("app.insertCalendar", json!({})).unwrap();
+        let d = app.ui.dialog.clone().unwrap();
+        let p = preview_params(&app, &d, true);
+        assert_eq!(p["previewSize"], json!([5000.0, 1250.0]));
+        let r = preview(&app.session.cache, &p, 400).unwrap();
+        assert!(r.width == 400 && r.height < 120, "{}×{}", r.width, r.height);
     }
 
     /// An empty frame the command won't replace (here, inside a group) isn't shown as filled:
