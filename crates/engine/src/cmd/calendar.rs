@@ -666,9 +666,12 @@ fn month_geom(area: Rect, l: &Look, o: &Opts, k: f64, rows: i64) -> MonthGeom {
         let f = room / extras(photo_h, notes_h);
         photo_h *= f;
         notes_h *= f;
-        if notes_h > 0.0 && notes_h < 30.0 * k {
-            // Too small for a ruled line: its room goes back to the picture.
+        if photo_h > 0.0 && notes_h > 0.0 && notes_h < 30.0 * k {
+            // Too small for a ruled line beside a picture: its room goes to the picture.
             photo_h += notes_h + 12.0 * k;
+            notes_h = 0.0;
+        } else if notes_h > 0.0 && notes_h < 14.0 * k {
+            // Without a picture the notes stay, unless their label can't fit.
             notes_h = 0.0;
         }
         if photo_h > 0.0 && photo_h < 24.0 * k {
@@ -1606,5 +1609,20 @@ mod tests {
         assert_eq!(numbers("sunday"), ["53", "1", "2", "3", "4", "5"]);
         // Monday first: Dec 28–Jan 3 (53), Jan 4–10 (1), … Jan 25–31 (4).
         assert_eq!(numbers("monday"), ["53", "1", "2", "3", "4"]);
+    }
+
+    /// Notes squeezed below a ruled line's height gave their room to the picture even when no
+    /// picture was asked for, making a picture frame out of nothing and dropping the notes.
+    /// Without a picture, the notes stay.
+    #[test]
+    fn squeezed_notes_never_turn_into_a_picture_frame() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({"width": 800, "height": 800})).unwrap();
+        s.execute("layout.insertCalendar", &json!({"year": 2027, "rect": [36, 36, 576, 90], "fontScale": 4, "notes": true, "group": false})).unwrap();
+        let doc = &s.doc().unwrap().doc;
+        assert!(!doc.spreads[0].items.iter().any(|i| i.alt_text == "Calendar photo"), "no picture was asked for");
+        assert_eq!(doc.stories.values().filter(|st| st.text == "Notes").count(), 1, "the notes stay");
+        let issues = s.execute("preflight.run", &json!({})).unwrap();
+        assert_eq!(issues["issues"].as_array().unwrap().iter().filter(|i| i["kind"] == "overset").count(), 0);
     }
 }
